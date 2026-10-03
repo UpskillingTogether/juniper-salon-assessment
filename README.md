@@ -14,7 +14,7 @@ On Windows PowerShell 5, run `npm install` followed by `npm run dev` (or use `np
 
 Open http://localhost:3000. Temporal Web UI: http://localhost:8233.
 The launch script starts the persisted Docker Temporal server, Worker and API; it spawns Node directly to support Windows.
-Stop the API/Worker with Ctrl+C. `npm run stop` stops Temporal without deleting its data volume. Restarting resumes recorded outreach; sample data is initialized only for a new salon workflow.
+Stop the API/Worker with Ctrl+C. `npm run stop` stops Temporal without deleting its data volume. Restarting preserves recorded outreach and pauses active offers for staff review; sample data is initialized only for a new salon workflow.
 If old demo terminals occupy port 3000, stop those first.
 
 ## Quick demonstration
@@ -32,7 +32,7 @@ If old demo terminals occupy port 3000, stop those first.
 
 - Eligibility: service, stylist preference (or Any), and the entire appointment fits general availability.
 - Earliest joined eligible and unreserved client first; only one active offer per client.
-- Same-day reply window: 15 minutes. Future window is chosen by staff (60-minute form default is an assumption, not an agreed policy).
+- Same-day reply window: 15 minutes. Future windows must be 16–1440 minutes and are chosen by staff (60-minute form default is an assumption, not an agreed policy).
 - Deadline begins only after successful sending, and never extends beyond appointment start.
 - Decline or timeout advances automatically. Exhaustion is explicitly unfilled.
 - Acceptance records the winner, closes the opening and marks the client booked in one durable operation.
@@ -43,11 +43,11 @@ If old demo terminals occupy port 3000, stop those first.
 
 ## How Temporal is used
 
-`salonWorkflow` is a single durable salon coordinator, Workflow ID **juniper-salon-v1**, Task Queue **juniper-salon**. Its Query supplies staff/client views. Synchronous Update handlers return explicit success/rejection and serialize acceptance, stop, manual fill and global client reservation. These handlers do not await between validation and mutations.
+`salonWorkflow` is a single durable salon coordinator, Workflow ID **juniper-salon-v1**, Task Queue **juniper-salon**. Its Query supplies staff/client views. Update handlers return explicit success/rejection and serialize acceptance, stop, manual fill and global client reservation. Reply handlers check recovery through an Activity first, then perform validation and mutations without an intervening await.
 
 The main loop uses durable `condition` timers for deadlines, and `sendOffer` Activities for simulated delivery. A failed Activity becomes a visible paused offer instead of silently advancing. A successful Activity starts the timer. The workflow checks cancellation again after delivery, so an in-flight send cannot reactivate a canceled offer.
 
-Progress lives in Temporal event history and the Docker SQLite volume, not browser memory. Restart the Worker during a wait; the same recipient/deadline is restored. An outage does not grant a fresh response window: overdue offers advance on recovery.
+Progress lives in Temporal event history and the Docker SQLite volume, not browser memory. While outreach is active, a health Activity runs approximately every 5 seconds. A newer Worker startup timestamp or a processing gap longer than 15 seconds pauses active offers on recovery. Short server interruptions below this threshold may not be distinguishable from normal scheduling. The recipient reservation stays held; the original deadline is retained for staff reference. Client acceptance is blocked during review. Staff can resend the same offer with a fresh window beginning after successful delivery, record a manually confirmed answer, or stop outreach. The first monitoring check also conservatively pauses any active offer inherited from the previous code version.
 
 ## Verification
 
@@ -56,7 +56,7 @@ npm run typecheck
 npm test
 ```
 
-The Temporal time-skipping integration test exercises FIFO, global reservations, decline, timeout, old-link rejection, concurrent close actions, idempotent acceptance, pause/retry, manual response, cancellation and Square follow-up. Browser checks cover creating an opening, failed delivery warning, retry and client acceptance. A live Worker restart preserved the current offer and its original deadline.
+The Temporal time-skipping integration test exercises FIFO, global reservations, decline, timeout, old-link rejection, concurrent close actions, idempotent acceptance, pause/retry, manual response, cancellation and Square follow-up. Browser checks cover creating an opening, failed delivery warning, retry and client acceptance. A live Worker restart paused the same client offer with an outage warning and no automatic progression. The recovery integration test checks blocked acceptance and explicit resend with a new deadline. API checks reject a future 15-minute window and accept 16 minutes.
 
 Screenshots are under `evidence/`.
 

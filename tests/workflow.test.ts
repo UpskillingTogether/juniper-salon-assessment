@@ -45,3 +45,36 @@ test('durable salon: ordered offers, reservation, decline, timeout, failure reco
   });
  }finally{await env.teardown();}
 });
+
+
+test('worker recovery pauses the same client before accepting; explicit resend starts a fresh deadline',async()=>{
+ const env=await TestWorkflowEnvironment.createTimeSkipping();
+ let startedAt=0;
+ try{
+  const worker=await Worker.create({connection:env.nativeConnection,taskQueue:'recovery-test',workflowsPath:require.resolve('../src/workflows'),activities:{...activities,checkOutreachHealth:async()=>({workerStartedAt:startedAt})}});
+  await worker.runUntil(async()=>{
+   const h=await env.client.workflow.start(salonWorkflow,{workflowId:'recovery-test',taskQueue:'recovery-test'});
+   const now=await env.currentTimeMs();
+   const opening:Opening={id:'recovery',service:'Cut',stylist:'Carla',startsAt:new Date(now+86400000).toISOString().slice(0,10)+'T14:00:00-07:00',duration:60,responseMinutes:60,demo:false,failNext:false,status:'searching',offers:[],history:[]};
+   await h.executeUpdate(salonCommand,{args:[{action:'create',openingId:opening.id,opening}]});
+   let state:SalonState;
+   async function waitFor(status:string){for(let i=0;i<100;i++){const s=await h.query(getSalon);if(s.openings[0].offers[0]?.status===status)return s;await new Promise(r=>setTimeout(r,20));}throw Error('Offer not ready');}
+   state=await waitFor('waiting');const offer=state.openings[0].offers[0];const originalDeadline=offer.deadline!;
+   await env.sleep('1 second');startedAt=await env.currentTimeMs();
+   const reply=await h.executeUpdate(salonCommand,{args:[{action:'accept',openingId:opening.id,offerId:offer.id}]});
+   assert.equal(reply.ok,false,'client cannot accept during recovery review');
+   state=await waitFor('paused');
+   assert.equal(state.openings[0].offers.length,1,'no silent advancement');
+   assert.equal(state.openings[0].offers[0].pauseReason,'outage');
+   assert.equal(state.openings[0].offers[0].deadline,undefined);
+   assert.equal(state.openings[0].offers[0].previousDeadline,originalDeadline);
+   await h.executeUpdate(salonCommand,{args:[{action:'retry',openingId:opening.id,offerId:offer.id}]});
+   state=await waitFor('waiting');
+   assert.equal(state.openings[0].offers[0].id,offer.id,'reservation retained');
+   assert(state.openings[0].offers[0].deadline!>originalDeadline,'staff explicitly granted a new window');
+   await h.executeUpdate(salonCommand,{args:[{action:'stop',openingId:opening.id}]});
+   assert.equal((await h.executeUpdate(salonCommand,{args:[{action:'accept',openingId:opening.id,offerId:offer.id}]})).ok,false);
+   await h.terminate();
+  });
+ }finally{await env.teardown();}
+});

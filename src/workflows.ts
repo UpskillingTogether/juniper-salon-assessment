@@ -1,8 +1,8 @@
-import { condition, defineQuery, defineUpdate, proxyActivities, setHandler } from '@temporalio/workflow';
+import { condition, defineQuery, defineUpdate, proxyActivities, setHandler, patched } from '@temporalio/workflow';
 import type * as activities from './activities';
 import type { SalonState, Command, CommandResult, Opening, Offer } from './types';
 import { sampleClients } from './sample';
-const { sendOffer } = proxyActivities<typeof activities>({ startToCloseTimeout:'10 seconds', retry:{maximumAttempts:1} });
+const { sendOffer, checkOutreachHealth } = proxyActivities<typeof activities>({ startToCloseTimeout:'10 seconds', retry:{maximumAttempts:1} });
 export const getSalon = defineQuery<SalonState>('getSalon');
 export const salonCommand = defineUpdate<CommandResult, [Command]>('salonCommand');
 
@@ -13,8 +13,34 @@ export async function salonWorkflow(): Promise<void> {
   let revision = 0;
   const log = (o:Opening,message:string) => o.history.push({at:Date.now(),message});
   const active = (o:Opening): Offer | undefined => o.offers.find(x=>['sending','waiting','paused'].includes(x.status));
+  let lastHealthyAt: number | undefined;
+  function pauseForRecovery() {
+    for (const o of state.openings) {
+      const offer=active(o);
+      if(offer && ['waiting','sending'].includes(offer.status)) {
+        offer.previousDeadline=offer.deadline;
+        offer.deadline=undefined;
+        offer.status='paused'; offer.pauseReason='outage'; o.status='paused';
+        offer.warning='System interruption detected. Contact this client manually to confirm their answer, resend with a new response window, or stop outreach. Their reservation is held.';
+        log(o,`${offer.clientName}: system interruption; outreach paused for staff review. No automatic progression.`);
+        revision++;
+      }
+    }
+  }
+  async function verifyHealth() {
+    if(!patched('outage-review-v1')) return;
+    const previous=lastHealthyAt;
+    try {
+      const health=await checkOutreachHealth();
+      const now=Date.now();
+      if(previous===undefined || health.workerStartedAt>previous || now-previous>15000) pauseForRecovery();
+      lastHealthyAt=now;
+    } catch { pauseForRecovery(); lastHealthyAt=Date.now(); }
+  }
   setHandler(getSalon,()=>state);
-  setHandler(salonCommand,(cmd)=>{
+  setHandler(salonCommand,async (cmd)=>{
+    // Check recovery first; all reply validation and mutations after the await are atomic.
+    if(cmd.action==='accept'||cmd.action==='decline'||cmd.action==='retry') await verifyHealth();
     if(cmd.action==='create') {
       if(state.openings.some(o=>o.id===cmd.openingId)) return {ok:true,message:'Opening already created.'};
       if(!cmd.opening) return {ok:false,message:'Opening details required.'};
@@ -42,10 +68,11 @@ export async function salonWorkflow(): Promise<void> {
     if(!offer || offer.id!==cmd.offerId) return {ok:false,message:'This offer is no longer available. It cannot claim the appointment.'};
     if(cmd.action==='retry') {
       if(offer.status!=='paused') return {ok:false,message:'Only paused deliveries can be retried.'};
-      offer.status='sending'; offer.warning=undefined; o.status='offering'; log(o,'Staff retried delivery. The deadline starts after successful sending.'); revision++;
+      offer.status='sending'; offer.warning=undefined; offer.pauseReason=undefined; o.status='offering'; log(o,'Staff explicitly resent the offer. A fresh deadline starts after successful delivery.'); revision++;
       return {ok:true,message:'Retry queued.'};
     }
     if(offer.status!=='waiting' && !(cmd.manual && offer.status==='paused')) return {ok:false,message:'This offer has not been successfully sent. Staff must resolve the delivery warning.'};
+    if(new Date(o.startsAt).getTime()<=Date.now()) return {ok:false,message:'The appointment start time has passed. Stop this opening.'};
     if(offer.deadline && Date.now()>=offer.deadline) {
       offer.status='expired'; o.status='searching'; log(o,`${offer.clientName}: expired. Late replies cannot claim this slot.`); revision++;
       return {ok:false,message:'The response deadline has passed. This offer has expired.'};
@@ -61,6 +88,8 @@ export async function salonWorkflow(): Promise<void> {
   });
   while(true) {
     const seen=revision;
+    const healthEnabled=patched('outage-review-v1');
+    if(healthEnabled) await verifyHealth();
     for(const o of state.openings) {
       if(!['searching','offering','paused','unfilled'].includes(o.status)) continue;
       const current=active(o);
@@ -89,6 +118,7 @@ export async function salonWorkflow(): Promise<void> {
       }
     }
     const deadlines=state.openings.flatMap(o=>['searching','offering','paused'].includes(o.status)?[new Date(o.startsAt).getTime(),...o.offers.filter(x=>x.status==='waiting').map(x=>x.deadline!)]:[]);
-    await condition(()=>revision!==seen,deadlines.length?Math.max(1,Math.min(...deadlines)-Date.now()):'1 day');
+    const monitoring=healthEnabled && state.openings.some(o=>active(o) && o.status!=='paused');
+    await condition(()=>revision!==seen,monitoring?Math.max(1,Math.min(5000,...deadlines.map(d=>d-Date.now()))):deadlines.length?Math.max(1,Math.min(...deadlines)-Date.now()):'1 day');
   }
 }

@@ -20,8 +20,9 @@ app.post('/api/openings',async (req,res)=>{
  const b=req.body; const date=new Date(b.startsAt);
  if(!['Cut','Color','Blowout'].includes(b.service)||!['Lena','Carla'].includes(b.stylist)||typeof b.startsAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00[+-]\d{2}:\d{2}$/.test(b.startsAt)||!Number.isFinite(date.getTime())||date.getTime()<=Date.now()||![30,60,90,120].includes(Number(b.duration))) { res.status(400).json({message:'Choose a future appointment, valid service, stylist and duration.'});return; }
  const localToday=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Los_Angeles'}).format(new Date());
- const minutes=b.startsAt.slice(0,10)===localToday?15:Number(b.responseMinutes);
- if(!Number.isFinite(minutes)||minutes<1||minutes>1440){res.status(400).json({message:'Future response window must be 1–1440 minutes.'});return;}
+ const sameDay=b.startsAt.slice(0,10)===localToday;
+ const minutes=sameDay?15:Number(b.responseMinutes);
+ if(!Number.isFinite(minutes)||(!sameDay && minutes<=15)||minutes>1440){res.status(400).json({message:'Future appointments need a reply window longer than 15 minutes, up to 1440 minutes.'});return;}
  const id=randomUUID(); const opening:Opening={id,service:b.service,stylist:b.stylist,startsAt:b.startsAt,duration:Number(b.duration),responseMinutes:minutes,demo:b.demo===true,failNext:b.failNext===true,status:'searching',offers:[],history:[]};
  const result=await command({action:'create',openingId:id,opening});res.status(result.ok?201:409).json({...result,id});
 });
