@@ -1,54 +1,20 @@
-import { connect } from "node:net";
-import { spawn, spawnSync } from "node:child_process";
-
-const compose = spawnSync("docker", ["compose", "up", "-d", "temporal"], {
-  stdio: "inherit",
-});
-if (compose.status !== 0) {
-  console.error("\nCould not start Temporal. Is Docker Desktop running?");
-  process.exit(compose.status ?? 1);
+import { connect } from 'node:net';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+const running=await new Promise(resolve=>{const socket=connect({host:'127.0.0.1',port:7233});socket.once('connect',()=>{socket.destroy();resolve(true);});socket.once('error',()=>{socket.destroy();resolve(false);});});
+if(!running){
+const compose=spawnSync('docker',['compose','up','-d','temporal'],{stdio:'inherit'});
+if(compose.status!==0){console.error('Could not start Temporal. Open Docker Desktop and retry.');process.exit(1);}
 }
-
-async function waitForPort(port, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const ready = await new Promise((resolve) => {
-      const socket = connect({ host: "127.0.0.1", port });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("error", () => resolve(false));
-    });
-    if (ready) return;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  throw new Error(`Temporal did not become ready on port ${port}.`);
-}
-
-await waitForPort(7233);
-const children = [
-  spawn("npm", ["run", "dev:worker"], { stdio: "inherit" }),
-  spawn("npm", ["run", "dev:api"], { stdio: "inherit" }),
-];
-let shuttingDown = false;
-function shutdown(exitCode = 0) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  for (const child of children) child.kill("SIGTERM");
-  process.exit(exitCode);
-}
-process.on("SIGINT", () => shutdown(0));
-process.on("SIGTERM", () => shutdown(0));
-for (const child of children) {
-  child.once("exit", (code, signal) => {
-    if (!shuttingDown) {
-      console.error(`A development process stopped (${signal ?? code}).`);
-      shutdown(code ?? 1);
-    }
-  });
-}
-console.log("\nStarter is launching:");
-console.log("  App:         http://localhost:3000");
-console.log("  Temporal UI: http://localhost:8233\n");
-
+const deadline=Date.now()+60000;
+while(true){const ok=await new Promise(resolve=>{const s=connect({host:'127.0.0.1',port:7233});s.once('connect',()=>{s.destroy();resolve(true);});s.once('error',()=>{s.destroy();resolve(false);});});if(ok)break;if(Date.now()>deadline)throw Error('Temporal did not become ready.');await new Promise(r=>setTimeout(r,500));}
+// Launch Node directly instead of npm.cmd. Compile once before starting both services.
+const tsc=fileURLToPath(new URL('../node_modules/typescript/bin/tsc',import.meta.url));
+const build=spawnSync(process.execPath,[...process.execArgv,tsc,'--outDir','work/build'],{stdio:'inherit'});
+if(build.status!==0)process.exit(build.status??1);
+const children=['work/build/src/worker.js','work/build/src/api.js'].map(file=>spawn(process.execPath,[...process.execArgv,file],{stdio:'inherit'}));
+let stopping=false;
+function stop(code=0){if(stopping)return;stopping=true;for(const child of children)child.kill();process.exit(code);}
+process.on('SIGINT',()=>stop());process.on('SIGTERM',()=>stop());
+for(const child of children){child.on('error',e=>{console.error(e);stop(1);});child.on('exit',code=>{if(!stopping)stop(code??1);});}
+console.log('Juniper launching: http://localhost:'+ (process.env.PORT??3000) +' | Temporal: http://localhost:8233');

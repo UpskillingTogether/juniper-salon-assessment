@@ -1,69 +1,76 @@
-# Temporal post-assessment starter
+# Juniper Salon · Opening concierge
 
-This repository provides a working local Temporal environment, API, Worker, and browser interface. The included neutral demo is intentionally unrelated to the customer’s final process. Use what you learn in the customer conversation to replace it.
+A local Temporal prototype based on Lena's customer interview. Staff enter canceled appointments; the system offers them to eligible waitlist clients one at a time, in join order, without repeatedly checking texts.
 
-## Important: create a new public repository—do not fork
+## Run
 
-Your submission must be in a brand-new **public** GitHub repository. **Do not use GitHub’s Fork button.** Forks connect submissions through GitHub’s fork network and can make other participants’ work easier to locate.
-
-Do not add `john-b-yang` or `vishakhpk` as collaborators. Because the repository is public, the assessment team can review it without write access.
-
-Before the timed assessment:
-
-1. Create a new **public** repository in your assigned GitHub organization. Do not initialize it with a README.
-2. Clone the starter:
-
-   ```bash
-   git clone <STARTER_REPOSITORY_URL> temporal-assessment
-   cd temporal-assessment
-   ```
-
-3. Point the clone at your new repository:
-
-   ```bash
-   git remote remove origin
-   git branch -M main
-   git remote add origin git@github.com:<YOUR_ORGANIZATION>/<YOUR_REPOSITORY>.git
-   git push -u origin main
-   ```
-
-4. Confirm that GitHub displays the **Public** label and does not say “forked from” another repository.
-
-If you accidentally create a fork, do not push assessment work to it. Create a new public repository, change your local `origin`, and ask the course team to remove the fork. Do not search for or view other participants’ assessment repositories.
-
-## Verify setup before the timed assessment
-
-Requirements: Node.js 20 or newer and Docker Desktop.
+Requires Node.js 20+ and Docker Desktop running with Linux containers.
 
 ```bash
-npm install
-npm run dev
+npm install && npm run dev
 ```
 
-Open <http://localhost:3000>, run the demo, and confirm that it completes. You can inspect it in the Temporal Web UI at <http://localhost:8233>. Setup time does not count toward the assessment.
+On Windows PowerShell 5, run `npm install` followed by `npm run dev` (or use `npm install; if ($LASTEXITCODE -eq 0) { npm run dev }`).
 
-Other commands:
+Open http://localhost:3000. Temporal Web UI: http://localhost:8233.
+The launch script starts the persisted Docker Temporal server, Worker and API; it spawns Node directly to support Windows.
+Stop the API/Worker with Ctrl+C. `npm run stop` stops Temporal without deleting its data volume. Restarting resumes recorded outreach; sample data is initialized only for a new salon workflow.
+If old demo terminals occupy port 3000, stop those first.
+
+## Quick demonstration
+
+1. Create a Color appointment with Lena tomorrow at 14:00, duration 90 minutes.
+2. Ava receives the first offer. Open **Open client offer** to see the phone-friendly appointment details and deadline.
+3. Decline: Mia receives the next offer automatically. Accept: the slot closes, the client is marked off the waitlist, and staff see a Square follow-up reminder.
+4. Try the old offer link: it cannot claim the slot. Repeat an accepted request: the same confirmation is returned.
+5. Create another opening on a different date with **Fast demo** checked. Its reply window is 20 seconds rather than the real 15 minutes; leave it unanswered to see timeout progression.
+6. Select **Simulate first text failing**. The opening pauses visibly with no deadline. Retry delivery, record a manual answer, or stop outreach.
+7. **Stop outreach** cancels the active offer immediately. **Fill directly** closes the opening for a direct booking.
+8. Create simultaneous openings on different dates. A client already holding an active offer is reserved across the salon. Overlapping openings for the same stylist are rejected.
+
+## Confirmed customer rules
+
+- Eligibility: service, stylist preference (or Any), and the entire appointment fits general availability.
+- Earliest joined eligible and unreserved client first; only one active offer per client.
+- Same-day reply window: 15 minutes. Future window is chosen by staff (60-minute form default is an assumption, not an agreed policy).
+- Deadline begins only after successful sending, and never extends beyond appointment start.
+- Decline or timeout advances automatically. Exhaustion is explicitly unfilled.
+- Acceptance records the winner, closes the opening and marks the client booked in one durable operation.
+- Stop/cancel and manual fill invalidate the outstanding link.
+- Failed delivery pauses outreach and retains the reservation. Staff can retry or record accept/decline after manual contact.
+- Staff see current recipient, deadline, history, unfilled state and Square follow-up.
+- Goal: refill at least half of last-minute cancellations without repeated staff checks. Dashboard rate is an illustrative prototype metric (filled / filled-or-unfilled), not evidence of business impact.
+
+## How Temporal is used
+
+`salonWorkflow` is a single durable salon coordinator, Workflow ID **juniper-salon-v1**, Task Queue **juniper-salon**. Its Query supplies staff/client views. Synchronous Update handlers return explicit success/rejection and serialize acceptance, stop, manual fill and global client reservation. These handlers do not await between validation and mutations.
+
+The main loop uses durable `condition` timers for deadlines, and `sendOffer` Activities for simulated delivery. A failed Activity becomes a visible paused offer instead of silently advancing. A successful Activity starts the timer. The workflow checks cancellation again after delivery, so an in-flight send cannot reactivate a canceled offer.
+
+Progress lives in Temporal event history and the Docker SQLite volume, not browser memory. Restart the Worker during a wait; the same recipient/deadline is restored. An outage does not grant a fresh response window: overdue offers advance on recovery.
+
+## Verification
 
 ```bash
-npm test          # Run the starter Workflow test without Docker
-npm run typecheck # Check TypeScript
-npm run stop      # Stop the local Temporal service
+npm run typecheck
+npm test
 ```
 
-## Repository map
+The Temporal time-skipping integration test exercises FIFO, global reservations, decline, timeout, old-link rejection, concurrent close actions, idempotent acceptance, pause/retry, manual response, cancellation and Square follow-up. Browser checks cover creating an opening, failed delivery warning, retry and client acceptance. A live Worker restart preserved the current offer and its original deadline.
 
-- `src/workflows.ts` — durable Workflow logic and message handlers
-- `src/worker.ts` — Worker and Task Queue configuration
-- `src/api.ts` — browser-facing API and Temporal Client
-- `src/types.ts` — shared data types
-- `public/` — customer-facing interface
-- `tests/` — Workflow test example
+Screenshots are under `evidence/`.
 
-You may change any application file. Do not edit generated files in `node_modules`.
+## Simulated and excluded
 
-## Documentation
+- No real SMS is sent. Delivery is a real Temporal Activity with simulated success/failure; client links open locally. A real provider needs offer-ID idempotency, delivery receipts and confirmation delivery.
+- Waitlist uses six sample clients; availability is a daily Pacific-time hour range, on all dates. There is no Google Sheets or Square integration.
+- Staff update existing appointments in Square manually; the prototype never claims to perform that update.
+- Local-only, unauthenticated demo. Production needs staff authentication, signed high-entropy offer tokens, consent/opt-out handling and provider credentials before real client use.
+- A single coordinator is appropriate for this small prototype, but it has no history rollover, archival or long-term reporting. Add continue-as-new and storage boundaries for sustained production use.
+- Direct bookings are entered as free text; staff coordinate existing appointments and waitlist identity manually.
 
-- [TypeScript developer guide](https://docs.temporal.io/develop/typescript)
-- [Workflows](https://docs.temporal.io/workflows)
-- [Activities](https://docs.temporal.io/activities)
-- [Signals, Queries, and Updates](https://docs.temporal.io/encyclopedia/workflow-message-passing)
+## Practical next step
+
+Pilot with Lena and Carla using a small opted-in waitlist. Agree on the future-appointment reply window, integrate an SMS provider with idempotent delivery and failure monitoring, and add staff login. Track refill rate and staff touches over two weeks before automating Square changes.
+
+No public app deployment is required or performed.
